@@ -1,11 +1,13 @@
 import { WebSocketServer } from 'ws';
 import { RealtimeClient } from '@openai/realtime-api-beta';
+import { AudioInterceptor } from './audio-interceptor.js';
 
 export class RealtimeRelay {
   constructor(apiKey) {
     this.apiKey = apiKey;
     this.sockets = new WeakMap();
     this.wss = null;
+    this.audioInterceptor = new AudioInterceptor('audio-outputs');
   }
 
   listen(port) {
@@ -35,9 +37,11 @@ export class RealtimeRelay {
     const client = new RealtimeClient({ apiKey: this.apiKey });
 
     // Relay: OpenAI Realtime API Event -> Browser Event
-    client.realtime.on('server.*', (event) => {
+    client.realtime.on('server.*', async (event) => {
       this.log(`Relaying "${event.type}" to Client`);
-      ws.send(JSON.stringify(event));
+      // Intercept the event for audio processing
+      const processedEvent = await this.audioInterceptor.handleEvent(event);
+      ws.send(JSON.stringify(processedEvent));
     });
     client.realtime.on('close', () => ws.close());
 

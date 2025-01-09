@@ -23,9 +23,12 @@ import { X, Edit, Zap, ArrowUp, ArrowDown } from 'react-feather';
 import { Button } from '../components/button/Button';
 import { Toggle } from '../components/toggle/Toggle';
 import { Map } from '../components/Map';
-
+import TextInput from '../modifications/TextInput';  // adjust path as needed
+import { saveAudioToFile } from '../modifications/saveAudioToFile';  // adjust path as needed
 import './ConsolePage.scss';
 import { isJsxOpeningLikeElement } from 'typescript';
+import { combineAudioChunks } from '../utils/audioUtils'; // Fixed import path
+import { AudioInterceptor } from '../utils/audio-interceptor';
 
 /**
  * Type for result from get_weather() function call
@@ -124,6 +127,14 @@ export function ConsolePage() {
     lng: -122.418137,
   });
   const [marker, setMarker] = useState<Coordinates | null>(null);
+  const [audioChunks, setAudioChunks] = useState<Record<string, Int16Array[]>>({});
+
+  const audioInterceptorRef = useRef<AudioInterceptor>(
+    new AudioInterceptor({
+      sampleRate: 24000,
+      channels: 1
+    })
+  );
 
   /**
    * Utility for formatting the timing of logs
@@ -173,8 +184,12 @@ export function ConsolePage() {
     setRealtimeEvents([]);
     setItems(client.conversation.getItems());
 
+    // Add voice configuration here
+    client.updateSession({ instructions: `We're going to learn together a maamar from the Rebbe. Basi Legani 5725.` });
+    client.updateSession({ voice: 'echo' });
+
     // Connect to microphone
-    await wavRecorder.begin();
+    // await wavRecorder.begin();
 
     // Connect to audio output
     await wavStreamPlayer.connect();
@@ -184,8 +199,7 @@ export function ConsolePage() {
     client.sendUserMessageContent([
       {
         type: `input_text`,
-        text: `Hello!`,
-        // text: `For testing purposes, I want you to list ten car brands. Number each item, e.g. "one (or whatever number you are one): the item name".`
+        text: `Hey`
       },
     ]);
 
@@ -476,20 +490,52 @@ export function ConsolePage() {
         await client.cancelResponse(trackId, offset);
       }
     });
+
     client.on('conversation.updated', async ({ item, delta }: any) => {
-      const items = client.conversation.getItems();
-      if (delta?.audio) {
-        wavStreamPlayer.add16BitPCM(delta.audio, item.id);
-      }
-      if (item.status === 'completed' && item.formatted.audio?.length) {
-        const wavFile = await WavRecorder.decode(
-          item.formatted.audio,
-          24000,
-          24000
-        );
-        item.formatted.file = wavFile;
-      }
-      setItems(items);
+        const items = client.conversation.getItems();
+        
+        if (delta?.audio) {
+            console.log(`Received audio delta for item ${item.id}:`, delta.audio);
+            wavStreamPlayer.add16BitPCM(delta.audio, item.id);
+        }
+
+        if (item.status === 'completed' && item.formatted.audio?.length) {
+            // Client-side download
+            const wavFile = await WavRecorder.decode(
+                item.formatted.audio,
+                24000,
+                24000
+            );
+            if (wavFile?.blob) {
+                // Client download
+                const url = URL.createObjectURL(wavFile.blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `response_${item.id}_final.wav`;
+                link.click();
+                URL.revokeObjectURL(url);
+
+                // Server upload using formatted.file
+                if (item.formatted.file?.blob) {
+                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                    const formData = new FormData();
+                    formData.append('audio', item.formatted.file.blob, `${timestamp}_${item.id}.wav`);
+                    
+                    try {
+                        const response = await fetch('/save-audio', {
+                            method: 'POST',
+                            body: formData
+                        });
+                        console.log('Server upload complete:', await response.text());
+                    } catch (error) {
+                        console.error('Error uploading to server:', error);
+                    }
+                }
+            }
+            item.formatted.file = wavFile;
+        }
+        
+        setItems(items);
     });
 
     setItems(client.conversation.getItems());
@@ -499,6 +545,36 @@ export function ConsolePage() {
       client.reset();
     };
   }, []);
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    
+    if (!file.type.includes('audio/wav')) {
+      alert('Please upload a WAV file');
+      return;
+    }
+
+    const arrayBuffer = await file.arrayBuffer();
+    const audioContext = new AudioContext({ sampleRate: 24000 });
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    
+    // Convert to Int16Array
+    const float32Array = audioBuffer.getChannelData(0);
+    const int16Array = new Int16Array(float32Array.length);
+    
+    for (let i = 0; i < float32Array.length; i++) {
+      const s = Math.max(-1, Math.min(1, float32Array[i]));
+      int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+
+    // Send to client
+    const client = clientRef.current;
+    if (client && client.isConnected()) {
+      client.appendInputAudio(int16Array);
+      client.createResponse();
+    }
+  };
 
   /**
    * Render the application
@@ -598,6 +674,12 @@ export function ConsolePage() {
               })}
             </div>
           </div>
+          <TextInput onSubmit={(content) => {
+  const client = clientRef.current;
+  if (client && client.isConnected()) {
+    client.sendUserMessageContent(content);
+  }
+}} />
           <div className="content-block conversation">
             <div className="content-block-title">conversation</div>
             <div className="content-block-body" data-conversation-content>
@@ -689,6 +771,21 @@ export function ConsolePage() {
                 isConnected ? disconnectConversation : connectConversation
               }
             />
+            <>
+              <input
+                type="file"
+                accept="audio/wav"
+                style={{ display: 'none' }}
+                id="wav-upload"
+                onChange={handleFileUpload}
+              />
+              <Button
+                label="Upload WAV"
+                onClick={() => document.getElementById('wav-upload')?.click()}
+                disabled={!isConnected}
+              />
+              <div className="spacer" />
+            </>
           </div>
         </div>
         <div className="content-right">
@@ -729,3 +826,78 @@ export function ConsolePage() {
     </div>
   );
 }
+
+export function processAudioData(audioChunks: Int16Array[]): Int16Array {
+    // Example logic to process audio data
+    const totalLength = audioChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const combinedBuffer = new Int16Array(totalLength);
+
+    let offset = 0;
+    audioChunks.forEach((chunk) => {
+        combinedBuffer.set(chunk, offset);
+        offset += chunk.length;
+    });
+
+    return combinedBuffer;
+}
+
+export const handleConversationAudioUpdate = async (
+    item: any, 
+    delta: any, 
+    wavStreamPlayer: any, 
+    audioChunks: Record<string, Int16Array[]>,
+    audioInterceptorRef: { current: any }
+) => {
+    if (delta?.audio) {
+        console.log(`Received audio delta for item ${item.id}:`, delta.audio);
+        wavStreamPlayer.add16BitPCM(delta.audio, item.id);
+        
+        // Store chunks for client-side download
+        if (!audioChunks[item.id]) {
+            audioChunks[item.id] = [];
+        }
+        audioChunks[item.id].push(delta.audio);
+
+        // Handle server-side upload via AudioInterceptor
+        const interceptor = audioInterceptorRef.current;
+        await interceptor.addChunk(delta.audio);
+    }
+
+    if (item.status === 'completed' && item.formatted.audio?.length) {
+        // Handle client-side download
+        const wavFile = await WavRecorder.decode(
+            item.formatted.audio,
+            24000,
+            24000
+        );
+        if (wavFile?.blob) {
+            const url = URL.createObjectURL(wavFile.blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `response_${item.id}_final.wav`;
+            link.click();
+            URL.revokeObjectURL(url);
+        }
+        item.formatted.file = wavFile;
+
+        // Handle server-side upload completion
+        const combinedBuffer = combineAudioChunks(audioChunks[item.id]);
+        console.log(`Combined buffer for item ${item.id}:`, combinedBuffer);
+
+        // Send combined buffer to server
+        await fetch('/save-audio', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                itemId: item.id,
+                audioData: Array.from(combinedBuffer),
+            }),
+        });
+
+        delete audioChunks[item.id];
+        await audioInterceptorRef.current.processAudio();
+    }
+
+    return item;
+};
+
