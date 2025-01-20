@@ -176,31 +176,41 @@ export function ConsolePage() {
       return;
     }
 
-    // Set state variables
-    startTimeRef.current = new Date().toISOString();
-    setIsConnected(true);
-    setRealtimeEvents([]);
-    setItems(client.conversation.getItems());
+    try {
+      // Set state variables
+      startTimeRef.current = new Date().toISOString();
+      setIsConnected(true);
+      setRealtimeEvents([]);
+      setItems(client.conversation.getItems());
 
-    // Connect to audio output
-    await wavStreamPlayer.connect();
+      // Connect to audio output first
+      console.log('Connecting to audio output...');
+      await wavStreamPlayer.connect();
 
-    // Connect to realtime API
-    await client.connect();
+      // Connect to realtime API
+      console.log('Connecting to realtime API...');
+      await client.connect();
 
-    // Update session with model after initial setup
-    client.updateSession({ model: 'gpt-4o-realtime-preview-2024-12-17' });
+      // Update session with model after initial setup
+      console.log('Updating session model...');
+      client.updateSession({ model: 'gpt-4o-realtime-preview-2024-12-17' });
 
-    // Send initial message
-    client.sendUserMessageContent([
-      {
-        type: `input_text`,
-        text: `Hey`
-      },
-    ]);
+      // Send initial message
+      console.log('Sending initial message...');
+      client.sendUserMessageContent([
+        {
+          type: 'input_text',
+          text: 'Hey'
+        },
+      ]);
 
-    if (client.getTurnDetectionType() === 'server_vad') {
-      await wavRecorder.record((data) => client.appendInputAudio(data.mono));
+      if (client.getTurnDetectionType() === 'server_vad') {
+        console.log('Starting audio recording...');
+        await wavRecorder.record((data) => client.appendInputAudio(data.mono));
+      }
+    } catch (error) {
+      console.error('Error in connectConversation:', error);
+      setIsConnected(false);
     }
   }, []);
 
@@ -385,7 +395,7 @@ export function ConsolePage() {
   useEffect(() => {
     async function initializeClient() {
       try {
-        const sessionData = await createSession(process.env.OPENAI_API_KEY || '');
+        const sessionData = await createSession(apiKey);
         clientRef.current = new RealtimeClient({
           url: LOCAL_RELAY_SERVER_URL || undefined,
           apiKey: sessionData.client_secret.value,
@@ -399,7 +409,7 @@ export function ConsolePage() {
     }
 
     initializeClient();
-  }, []);
+  }, [apiKey]);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];

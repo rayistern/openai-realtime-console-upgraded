@@ -1,13 +1,18 @@
 export async function createSession(apiKey: string) {
-  if (!apiKey) {
-    throw new Error('API key is missing');
+  // Use environment variable if available, otherwise use passed in key
+  const key = process.env.REACT_APP_OPENAI_API_KEY || apiKey;
+  
+  if (!key) {
+    throw new Error('API key is missing - please set REACT_APP_OPENAI_API_KEY in your .env file');
   }
+
+  console.log('Creating session with key:', key.slice(0, 3) + '...');
 
   try {
     const response = await fetch('https://api.openai.com/v1/realtime/sessions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${apiKey}`,
+        'Authorization': `Bearer ${key}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -33,15 +38,19 @@ export async function createSession(apiKey: string) {
       }),
     });
 
+    console.log('Response status:', response.status);
+    
     if (!response.ok) {
       const errorText = await response.text();
+      console.error('Error response:', errorText);
       throw new Error(`Failed to create session: ${response.statusText} - ${errorText}`);
     }
 
     const sessionData = await response.json();
+    console.log('Session created successfully:', sessionData);
     return sessionData;
   } catch (error) {
     console.error('Error creating session:', error);
     throw error;
   }
-} 
+}
