@@ -29,6 +29,7 @@ import './ConsolePage.scss';
 import { isJsxOpeningLikeElement } from 'typescript';
 import { combineAudioChunks } from '../utils/audioUtils'; // Fixed import path
 import { AudioInterceptor } from '../utils/audio-interceptor';
+import { createSession } from '../utils/createSession'; // Import the session creation function
 
 /**
  * Type for result from get_weather() function call
@@ -83,16 +84,7 @@ export function ConsolePage() {
   const wavStreamPlayerRef = useRef<WavStreamPlayer>(
     new WavStreamPlayer({ sampleRate: 24000 })
   );
-  const clientRef = useRef<RealtimeClient>(
-    new RealtimeClient(
-      LOCAL_RELAY_SERVER_URL
-        ? { url: LOCAL_RELAY_SERVER_URL }
-        : {
-            apiKey: apiKey,
-            dangerouslyAllowAPIKeyInBrowser: true,
-          }
-    )
-  );
+  const clientRef = useRef<RealtimeClient | null>(null);
 
   /**
    * References for
@@ -174,9 +166,15 @@ export function ConsolePage() {
    * WavRecorder taks speech input, WavStreamPlayer output, client is API client
    */
   const connectConversation = useCallback(async () => {
+    console.log('Connect button clicked');
     const client = clientRef.current;
     const wavRecorder = wavRecorderRef.current;
     const wavStreamPlayer = wavStreamPlayerRef.current;
+
+    if (!client) {
+      console.error('Client is not initialized');
+      return;
+    }
 
     // Set state variables
     startTimeRef.current = new Date().toISOString();
@@ -184,18 +182,16 @@ export function ConsolePage() {
     setRealtimeEvents([]);
     setItems(client.conversation.getItems());
 
-    // Add voice configuration here
-    client.updateSession({ instructions: `We're going to learn together a maamar from the Rebbe. Basi Legani 5725.` });
-    client.updateSession({ voice: 'echo' });
-
-    // Connect to microphone
-    // await wavRecorder.begin();
-
     // Connect to audio output
     await wavStreamPlayer.connect();
 
     // Connect to realtime API
     await client.connect();
+
+    // Update session with model after initial setup
+    client.updateSession({ model: 'gpt-4o-realtime-preview-2024-12-17' });
+
+    // Send initial message
     client.sendUserMessageContent([
       {
         type: `input_text`,
@@ -211,30 +207,23 @@ export function ConsolePage() {
   /**
    * Disconnect and reset conversation state
    */
-  const disconnectConversation = useCallback(async () => {
-    setIsConnected(false);
-    setRealtimeEvents([]);
-    setItems([]);
-    setMemoryKv({});
-    setCoords({
-      lat: 37.775593,
-      lng: -122.418137,
-    });
-    setMarker(null);
-
+  const disconnectConversation = useCallback(() => {
+    console.log('Disconnect button clicked');
     const client = clientRef.current;
-    client.disconnect();
-
-    const wavRecorder = wavRecorderRef.current;
-    await wavRecorder.end();
-
-    const wavStreamPlayer = wavStreamPlayerRef.current;
-    await wavStreamPlayer.interrupt();
+    if (client) {
+      client.disconnect();
+    } else {
+      console.error('Client is not initialized');
+    }
   }, []);
 
   const deleteConversationItem = useCallback(async (id: string) => {
     const client = clientRef.current;
-    client.deleteItem(id);
+    if (client) {
+      client.deleteItem(id);
+    } else {
+      console.error('Client is not initialized');
+    }
   }, []);
 
   /**
@@ -247,11 +236,11 @@ export function ConsolePage() {
     const wavRecorder = wavRecorderRef.current;
     const wavStreamPlayer = wavStreamPlayerRef.current;
     const trackSampleOffset = await wavStreamPlayer.interrupt();
-    if (trackSampleOffset?.trackId) {
+    if (client && trackSampleOffset?.trackId) {
       const { trackId, offset } = trackSampleOffset;
       await client.cancelResponse(trackId, offset);
     }
-    await wavRecorder.record((data) => client.appendInputAudio(data.mono));
+    await wavRecorder.record((data) => client?.appendInputAudio(data.mono));
   };
 
   /**
@@ -262,7 +251,11 @@ export function ConsolePage() {
     const client = clientRef.current;
     const wavRecorder = wavRecorderRef.current;
     await wavRecorder.pause();
-    client.createResponse();
+    if (client) {
+      client.createResponse();
+    } else {
+      console.error('Client is not initialized');
+    }
   };
 
   /**
@@ -271,6 +264,10 @@ export function ConsolePage() {
   const changeTurnEndType = async (value: string) => {
     const client = clientRef.current;
     const wavRecorder = wavRecorderRef.current;
+    if (!client) {
+      console.error('Client is not initialized');
+      return;
+    }
     if (value === 'none' && wavRecorder.getStatus() === 'recording') {
       await wavRecorder.pause();
     }
@@ -386,164 +383,22 @@ export function ConsolePage() {
    * Set all of our instructions, tools, events and more
    */
   useEffect(() => {
-    // Get refs
-    const wavStreamPlayer = wavStreamPlayerRef.current;
-    const client = clientRef.current;
-
-    // Set instructions
-    client.updateSession({ instructions: instructions });
-    // Set transcription, otherwise we don't get user transcriptions back
-    client.updateSession({ input_audio_transcription: { model: 'whisper-1' } });
-
-    // Add tools
-    client.addTool(
-      {
-        name: 'set_memory',
-        description: 'Saves important data about the user into memory.',
-        parameters: {
-          type: 'object',
-          properties: {
-            key: {
-              type: 'string',
-              description:
-                'The key of the memory value. Always use lowercase and underscores, no other characters.',
-            },
-            value: {
-              type: 'string',
-              description: 'Value can be anything represented as a string',
-            },
-          },
-          required: ['key', 'value'],
-        },
-      },
-      async ({ key, value }: { [key: string]: any }) => {
-        setMemoryKv((memoryKv) => {
-          const newKv = { ...memoryKv };
-          newKv[key] = value;
-          return newKv;
+    async function initializeClient() {
+      try {
+        const sessionData = await createSession(process.env.OPENAI_API_KEY || '');
+        clientRef.current = new RealtimeClient({
+          url: LOCAL_RELAY_SERVER_URL || undefined,
+          apiKey: sessionData.client_secret.value,
+          dangerouslyAllowAPIKeyInBrowser: true,
         });
-        return { ok: true };
+
+        // Additional setup if needed
+      } catch (error) {
+        console.error('Error initializing client:', error);
       }
-    );
-    client.addTool(
-      {
-        name: 'get_weather',
-        description:
-          'Retrieves the weather for a given lat, lng coordinate pair. Specify a label for the location.',
-        parameters: {
-          type: 'object',
-          properties: {
-            lat: {
-              type: 'number',
-              description: 'Latitude',
-            },
-            lng: {
-              type: 'number',
-              description: 'Longitude',
-            },
-            location: {
-              type: 'string',
-              description: 'Name of the location',
-            },
-          },
-          required: ['lat', 'lng', 'location'],
-        },
-      },
-      async ({ lat, lng, location }: { [key: string]: any }) => {
-        setMarker({ lat, lng, location });
-        setCoords({ lat, lng, location });
-        const result = await fetch(
-          `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,wind_speed_10m`
-        );
-        const json = await result.json();
-        const temperature = {
-          value: json.current.temperature_2m as number,
-          units: json.current_units.temperature_2m as string,
-        };
-        const wind_speed = {
-          value: json.current.wind_speed_10m as number,
-          units: json.current_units.wind_speed_10m as string,
-        };
-        setMarker({ lat, lng, location, temperature, wind_speed });
-        return json;
-      }
-    );
+    }
 
-    // handle realtime events from client + server for event logging
-    client.on('realtime.event', (realtimeEvent: RealtimeEvent) => {
-      setRealtimeEvents((realtimeEvents) => {
-        const lastEvent = realtimeEvents[realtimeEvents.length - 1];
-        if (lastEvent?.event.type === realtimeEvent.event.type) {
-          // if we receive multiple events in a row, aggregate them for display purposes
-          lastEvent.count = (lastEvent.count || 0) + 1;
-          return realtimeEvents.slice(0, -1).concat(lastEvent);
-        } else {
-          return realtimeEvents.concat(realtimeEvent);
-        }
-      });
-    });
-    client.on('error', (event: any) => console.error(event));
-    client.on('conversation.interrupted', async () => {
-      const trackSampleOffset = await wavStreamPlayer.interrupt();
-      if (trackSampleOffset?.trackId) {
-        const { trackId, offset } = trackSampleOffset;
-        await client.cancelResponse(trackId, offset);
-      }
-    });
-
-    client.on('conversation.updated', async ({ item, delta }: any) => {
-        const items = client.conversation.getItems();
-        
-        if (delta?.audio) {
-            console.log(`Received audio delta for item ${item.id}:`, delta.audio);
-            wavStreamPlayer.add16BitPCM(delta.audio, item.id);
-        }
-
-        if (item.status === 'completed' && item.formatted.audio?.length) {
-            // Client-side download
-            const wavFile = await WavRecorder.decode(
-                item.formatted.audio,
-                24000,
-                24000
-            );
-            if (wavFile?.blob) {
-                // Client download
-                const url = URL.createObjectURL(wavFile.blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = `response_${item.id}_final.wav`;
-                link.click();
-                URL.revokeObjectURL(url);
-
-                // Server upload using formatted.file
-                if (item.formatted.file?.blob) {
-                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-                    const formData = new FormData();
-                    formData.append('audio', item.formatted.file.blob, `${timestamp}_${item.id}.wav`);
-                    
-                    try {
-                        const response = await fetch('/save-audio', {
-                            method: 'POST',
-                            body: formData
-                        });
-                        console.log('Server upload complete:', await response.text());
-                    } catch (error) {
-                        console.error('Error uploading to server:', error);
-                    }
-                }
-            }
-            item.formatted.file = wavFile;
-        }
-        
-        setItems(items);
-    });
-
-    setItems(client.conversation.getItems());
-
-    return () => {
-      // cleanup; resets to defaults
-      client.reset();
-    };
+    initializeClient();
   }, []);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -675,11 +530,11 @@ export function ConsolePage() {
             </div>
           </div>
           <TextInput onSubmit={(content) => {
-  const client = clientRef.current;
-  if (client && client.isConnected()) {
-    client.sendUserMessageContent(content);
-  }
-}} />
+            const client = clientRef.current;
+            if (client && client.isConnected()) {
+              client.sendUserMessageContent(content);
+            }
+          }} />
           <div className="content-block conversation">
             <div className="content-block-title">conversation</div>
             <div className="content-block-body" data-conversation-content>
@@ -767,9 +622,7 @@ export function ConsolePage() {
               iconPosition={isConnected ? 'end' : 'start'}
               icon={isConnected ? X : Zap}
               buttonStyle={isConnected ? 'regular' : 'action'}
-              onClick={
-                isConnected ? disconnectConversation : connectConversation
-              }
+              onClick={isConnected ? disconnectConversation : connectConversation}
             />
             <>
               <input
