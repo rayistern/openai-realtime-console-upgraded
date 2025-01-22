@@ -7,7 +7,7 @@
 
 # testing
 /coverage
-
+/audio-outputs
 # production
 /build
 

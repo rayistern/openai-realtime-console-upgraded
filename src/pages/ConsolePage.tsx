@@ -195,7 +195,7 @@ export function ConsolePage() {
       console.log('Updating session model...');
       client.updateSession({ model: 'gpt-4o-realtime-preview-2024-12-17' });
 
-      // Send initial message
+      // Send initial message after successful connection
       console.log('Sending initial message...');
       client.sendUserMessageContent([
         {
@@ -396,6 +396,8 @@ export function ConsolePage() {
     async function initializeClient() {
       try {
         const sessionData = await createSession(apiKey);
+        console.log('Session data:', sessionData); // For debugging
+
         clientRef.current = new RealtimeClient({
           url: LOCAL_RELAY_SERVER_URL || undefined,
           apiKey: sessionData.client_secret.value,

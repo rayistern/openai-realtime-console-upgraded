@@ -20,83 +20,74 @@ app.post('/save-audio', async (req, res) => {
 export class AudioHandler {
   constructor(outputDir = 'audio-outputs') {
     this.outputDir = outputDir;
-    this.ensureDirectoryExists();
   }
 
-  async ensureDirectoryExists() {
-    try {
-      await fs.access(this.outputDir);
-    } catch {
-      await fs.mkdir(this.outputDir, { recursive: true });
+  async saveAudioFile(int16Array, filename) {
+    if (!int16Array || int16Array.length === 0) {
+      console.error('No audio data to save');
+      return;
     }
-  }
 
-  async saveAudioFile(audioData, filename) {
+    // Ensure output directory exists
+    await fs.mkdir(this.outputDir, { recursive: true });
+
+    // Create WAV file
+    const wavData = this.createWavData(int16Array, 24000, 1, 16);
+
+    // Write the file
     const filePath = path.join(this.outputDir, filename);
-    
-    // Convert audioData from String to Int16Array if necessary
-    if (typeof audioData === 'string') {
-        // Assuming audioData is a base64 encoded string
-        const buffer = Buffer.from(audioData, 'base64');
-        audioData = new Int16Array(buffer.buffer);
-    }
-
-    // Check if audioData is an Int16Array
-    if (!(audioData instanceof Int16Array)) {
-        console.error('Audio data is not an Int16Array');
-        return;
-    }
-    
-    // Create WAV header
-    const header = this.createWavHeader(audioData.length * 2);
-    
-    // Combine header and audio data
-    const fullBuffer = Buffer.concat([
-        Buffer.from(header),
-        Buffer.from(audioData.buffer)
-    ]);
-    
-    try {
-        await fs.writeFile(filePath, fullBuffer);
-        console.log(`Audio file saved at ${filePath}`);
-    } catch (error) {
-        console.error('Error saving audio file:', error);
-    }
-    return filePath;
+    await fs.writeFile(filePath, Buffer.from(wavData));
+    console.log(`Audio file saved at ${filePath}`);
   }
 
-  createWavHeader(length) {
+  createWavData(samples, sampleRate, numChannels, bitsPerSample) {
+    const header = this.createWavHeader(samples.length * 2, sampleRate, numChannels, bitsPerSample);
+    const wavBuffer = new Uint8Array(header.byteLength + samples.length * 2);
+
+    wavBuffer.set(new Uint8Array(header), 0);
+    wavBuffer.set(new Uint8Array(samples.buffer), header.byteLength);
+
+    return wavBuffer;
+  }
+
+  createWavHeader(dataLength, sampleRate, numChannels, bitsPerSample) {
     const buffer = new ArrayBuffer(44);
     const view = new DataView(buffer);
-    
-    // RIFF identifier
-    view.setUint32(0, 0x52494646, false); // "RIFF"
-    // File length minus RIFF header
-    view.setUint32(4, 36 + length, true);
-    // WAVE identifier
-    view.setUint32(8, 0x57415645, false); // "WAVE"
-    // Format chunk identifier
-    view.setUint32(12, 0x666D7420, false); // "fmt "
-    // Format chunk length
+
+    // RIFF identifier 'RIFF'
+    this.writeString(view, 0, 'RIFF');
+    // File length minus first 8 bytes (4 bytes for 'RIFF' and 4 for file length)
+    view.setUint32(4, 36 + dataLength, true);
+    // RIFF type 'WAVE'
+    this.writeString(view, 8, 'WAVE');
+    // Format chunk identifier 'fmt '
+    this.writeString(view, 12, 'fmt ');
+    // Format chunk length 16 bytes
     view.setUint32(16, 16, true);
-    // Sample format (raw)
+    // Sample format (1 is PCM)
     view.setUint16(20, 1, true);
-    // Channel count
-    view.setUint16(22, 1, true);
+    // Number of channels
+    view.setUint16(22, numChannels, true);
     // Sample rate
-    view.setUint32(24, 24000, true);
-    // Byte rate
-    view.setUint32(28, 48000, true);
-    // Block align
-    view.setUint16(32, 2, true);
+    view.setUint32(24, sampleRate, true);
+    // Byte rate (sample rate * block align)
+    view.setUint32(28, sampleRate * numChannels * bitsPerSample / 8, true);
+    // Block align (channels * bits/sample / 8)
+    view.setUint16(32, numChannels * bitsPerSample / 8, true);
     // Bits per sample
-    view.setUint16(34, 16, true);
-    // Data chunk identifier
-    view.setUint32(36, 0x64617461, false); // "data"
+    view.setUint16(34, bitsPerSample, true);
+    // Data chunk identifier 'data'
+    this.writeString(view, 36, 'data');
     // Data chunk length
-    view.setUint32(40, length, true);
-    
+    view.setUint32(40, dataLength, true);
+
     return buffer;
+  }
+
+  writeString(view, offset, string) {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
   }
 }
 

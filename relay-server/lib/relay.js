@@ -5,15 +5,13 @@ import { AudioInterceptor } from './audio-interceptor.js';
 export class RealtimeRelay {
   constructor(apiKey) {
     this.apiKey = apiKey;
-    this.sockets = new WeakMap();
-    this.wss = null;
-    this.audioInterceptor = new AudioInterceptor('audio-outputs');
+    this.audioInterceptor = new AudioInterceptor();
   }
 
   listen(port) {
     this.wss = new WebSocketServer({ port });
     this.wss.on('connection', this.connectionHandler.bind(this));
-    this.log(`Listening on ws://localhost:${port}`);
+    console.log(`Realtime Relay Server is running on port ${port}`);
   }
 
   async connectionHandler(ws, req) {
