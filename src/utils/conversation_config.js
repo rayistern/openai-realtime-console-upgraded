@@ -15,4 +15,4 @@ Personality:
 - Try speaking quickly as if excited
 `;
 
-export const model = 'gpt-4o-realtime-preview-2024-12-17';
+export const model = 'gpt-config-realtime-preview-2024-12-17';

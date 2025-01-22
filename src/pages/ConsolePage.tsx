@@ -119,12 +119,17 @@ export function ConsolePage() {
     lng: -122.418137,
   });
   const [marker, setMarker] = useState<Coordinates | null>(null);
-  const [audioChunks, setAudioChunks] = useState<Record<string, Int16Array[]>>({});
 
+  // Audio chunks storage for client-side download and server-side upload
+  const audioChunksRef = useRef<Record<string, Int16Array[]>>({});
+
+  /**
+   * Reference for AudioInterceptor
+   */
   const audioInterceptorRef = useRef<AudioInterceptor>(
     new AudioInterceptor({
       sampleRate: 24000,
-      channels: 1
+      channels: 1,
     })
   );
 
@@ -163,7 +168,7 @@ export function ConsolePage() {
 
   /**
    * Connect to conversation:
-   * WavRecorder taks speech input, WavStreamPlayer output, client is API client
+   * WavRecorder takes speech input, WavStreamPlayer output, client is API client
    */
   const connectConversation = useCallback(async () => {
     console.log('Connect button clicked');
@@ -191,16 +196,20 @@ export function ConsolePage() {
       console.log('Connecting to realtime API...');
       await client.connect();
 
-      // Update session with model after initial setup
-      console.log('Updating session model...');
-      client.updateSession({ model: 'gpt-4o-realtime-preview-2024-12-17' });
+      // Update session with model and instructions
+      console.log('Updating session...');
+      client.updateSession({
+        model: 'gpt-4o-realtime-preview-2024-12-17',
+        instructions: instructions,
+        input_audio_transcription: { model: 'whisper-1' },
+      });
 
       // Send initial message after successful connection
       console.log('Sending initial message...');
       client.sendUserMessageContent([
         {
           type: 'input_text',
-          text: 'Hey'
+          text: 'Hey',
         },
       ]);
 
@@ -219,12 +228,28 @@ export function ConsolePage() {
    */
   const disconnectConversation = useCallback(() => {
     console.log('Disconnect button clicked');
+    setIsConnected(false);
+    setRealtimeEvents([]);
+    setItems([]);
+    setMemoryKv({});
+    setCoords({
+      lat: 37.775593,
+      lng: -122.418137,
+    });
+    setMarker(null);
+
     const client = clientRef.current;
     if (client) {
       client.disconnect();
     } else {
       console.error('Client is not initialized');
     }
+
+    const wavRecorder = wavRecorderRef.current;
+    wavRecorder.end();
+
+    const wavStreamPlayer = wavStreamPlayerRef.current;
+    wavStreamPlayer.interrupt();
   }, []);
 
   const deleteConversationItem = useCallback(async (id: string) => {
@@ -390,7 +415,6 @@ export function ConsolePage() {
 
   /**
    * Core RealtimeClient and audio capture setup
-   * Set all of our instructions, tools, events and more
    */
   useEffect(() => {
     async function initializeClient() {
@@ -404,7 +428,125 @@ export function ConsolePage() {
           dangerouslyAllowAPIKeyInBrowser: true,
         });
 
-        // Additional setup if needed
+        const client = clientRef.current;
+
+        if (!client) {
+          throw new Error('Failed to initialize RealtimeClient');
+        }
+
+        // Set up event handlers and other configurations here
+
+        // Set instructions
+        client.updateSession({ instructions: instructions });
+        // Set transcription
+        client.updateSession({ input_audio_transcription: { model: 'whisper-1' } });
+
+        // Add tools (set_memory and get_weather)
+        // (Your existing tool setup code goes here)
+
+        // Handle realtime events
+        client.on('realtime.event', (realtimeEvent: RealtimeEvent) => {
+          setRealtimeEvents((realtimeEvents) => {
+            const lastEvent = realtimeEvents[realtimeEvents.length - 1];
+            if (lastEvent?.event.type === realtimeEvent.event.type) {
+              // Aggregate events
+              lastEvent.count = (lastEvent.count || 0) + 1;
+              return realtimeEvents.slice(0, -1).concat(lastEvent);
+            } else {
+              return realtimeEvents.concat(realtimeEvent);
+            }
+          });
+        });
+
+        client.on('error', (event: any) => console.error(event));
+
+        client.on('conversation.interrupted', async () => {
+          const trackSampleOffset = await wavStreamPlayerRef.current?.interrupt();
+          if (trackSampleOffset?.trackId) {
+            const { trackId, offset } = trackSampleOffset;
+            await client.cancelResponse(trackId, offset);
+          }
+        });
+
+        // Handle conversation updates
+        client.on(
+          'conversation.updated',
+          async ({
+            item,
+            delta,
+          }: {
+            item: ItemType;
+            delta: { [key: string]: any };
+          }) => {
+            const wavStreamPlayer = wavStreamPlayerRef.current;
+            const audioChunks = audioChunksRef.current;
+
+            if (delta?.audio) {
+              console.log(`Received audio delta for item ${item.id}:`, delta.audio);
+              wavStreamPlayer?.add16BitPCM(delta.audio, item.id);
+
+              // Store chunks for client-side download
+              if (!audioChunks[item.id]) {
+                audioChunks[item.id] = [];
+              }
+              audioChunks[item.id].push(delta.audio);
+
+              // Handle server-side upload via AudioInterceptor
+              const interceptor = audioInterceptorRef.current;
+              await interceptor.addChunk(delta.audio);
+            }
+
+            setItems([...client.conversation.getItems()]);
+          }
+        );
+
+        // Handle completed items
+        client.on(
+          'conversation.item.completed',
+          async ({ item }: { item: ItemType }) => {
+            const audioChunks = audioChunksRef.current;
+
+            if (item.formatted.audio?.length) {
+              // Client-side download
+              const wavFile = await WavRecorder.decode(
+                item.formatted.audio,
+                24000,
+                24000
+              );
+              if (wavFile?.blob) {
+                // Client download
+                const url = URL.createObjectURL(wavFile.blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `response_${item.id}_final.wav`;
+                link.click();
+                URL.revokeObjectURL(url);
+              }
+              item.formatted.file = wavFile;
+
+              // Handle server-side upload completion
+              const combinedBuffer = combineAudioChunks(audioChunks[item.id]);
+              console.log(`Combined buffer for item ${item.id}:`, combinedBuffer);
+
+              // Send combined buffer to server
+              await fetch('/save-audio', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  itemId: item.id,
+                  audioData: Array.from(combinedBuffer),
+                }),
+              });
+
+              delete audioChunks[item.id];
+              await audioInterceptorRef.current.processAudio();
+            }
+
+            setItems([...client.conversation.getItems()]);
+          }
+        );
+
+        setItems(client.conversation.getItems());
       } catch (error) {
         console.error('Error initializing client:', error);
       }
@@ -416,7 +558,7 @@ export function ConsolePage() {
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    
+
     if (!file.type.includes('audio/wav')) {
       alert('Please upload a WAV file');
       return;
@@ -425,11 +567,11 @@ export function ConsolePage() {
     const arrayBuffer = await file.arrayBuffer();
     const audioContext = new AudioContext({ sampleRate: 24000 });
     const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-    
+
     // Convert to Int16Array
     const float32Array = audioBuffer.getChannelData(0);
     const int16Array = new Int16Array(float32Array.length);
-    
+
     for (let i = 0; i < float32Array.length; i++) {
       const s = Math.max(-1, Math.min(1, float32Array[i]));
       int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
@@ -438,7 +580,13 @@ export function ConsolePage() {
     // Send to client
     const client = clientRef.current;
     if (client && client.isConnected()) {
+      // Start a new user message
+      client.sendUserMessageContent([{ type: 'input_audio' }]);
+
+      // Append the audio data
       client.appendInputAudio(int16Array);
+
+      // Create a response from the assistant
       client.createResponse();
     }
   };
@@ -728,7 +876,7 @@ export const handleConversationAudioUpdate = async (
         await interceptor.addChunk(delta.audio);
     }
 
-    if (item.status === 'completed' && item.formatted.audio?.length) {
+    if (item.end_type && item.formatted.audio?.length) {
         // Handle client-side download
         const wavFile = await WavRecorder.decode(
             item.formatted.audio,
